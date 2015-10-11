@@ -12,6 +12,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.AsyncTask;
 import android.os.Build;
@@ -76,7 +77,12 @@ public class TileBitmapDrawable extends Drawable {
 
     private final Rect mScreenNailRect = new Rect();
 
+    private int rotation;
+
     public static void attachTileBitmapDrawable(ImageView imageView, String path, Drawable placeHolder, OnInitializeListener listener) {
+        if (imageView instanceof TouchImageView) {//根据exif旋转imageview
+            ((TouchImageView) imageView).setImagePath(path);
+        }
         new InitializationTask(imageView, placeHolder, listener).execute(path);
     }
 
@@ -90,6 +96,11 @@ public class TileBitmapDrawable extends Drawable {
 
     private TileBitmapDrawable(ImageView parentView, BitmapRegionDecoder decoder, Bitmap screenNail) {
         mParentView = new WeakReference<ImageView>(parentView);
+        if (parentView instanceof TouchImageView) {
+            this.rotation = ((TouchImageView) parentView).getExifRotation();
+        } else {
+            this.rotation = 0;
+        }
 
         synchronized (decoder) {
             mRegionDecoder = decoder;
@@ -210,7 +221,15 @@ public class TileBitmapDrawable extends Drawable {
         final int visibleAreaTop = Math.max(0, (int) (-translationY / scale));
         final int visibleAreaRight = Math.min(mIntrinsicWidth, Math.round((-translationX + parentViewWidth) / scale));
         final int visibleAreaBottom = Math.min(mIntrinsicHeight, Math.round((-translationY + parentViewHeight) / scale));
-        mVisibleAreaRect.set(visibleAreaLeft, visibleAreaTop, visibleAreaRight, visibleAreaBottom);
+        if (rotation == 90 || rotation == 270) {//调整可视区域
+            int w = visibleAreaRight - visibleAreaLeft;
+            int h = visibleAreaBottom - visibleAreaTop;
+            int span = (h - w) / 2;
+            if (span < 0) span = 0;
+            mVisibleAreaRect.set(visibleAreaLeft - span, visibleAreaTop + span, visibleAreaRight + span, visibleAreaBottom - span);
+        } else {
+            mVisibleAreaRect.set(visibleAreaLeft, visibleAreaTop, visibleAreaRight, visibleAreaBottom);
+        }
 
         boolean cacheMiss = false;
 
@@ -255,6 +274,13 @@ public class TileBitmapDrawable extends Drawable {
                 }
             }
         }
+
+        //测试，显式当前可视区域
+        /*Paint mPaint=new Paint();
+        mPaint.setStyle(Style.STROKE);
+        mPaint.setColor(Color.RED);
+        mPaint.setStrokeWidth(20);
+        canvas.drawRect(mVisibleAreaRect, mPaint);*/
 
         // If we had a cache miss, we will need to redraw until all needed tiles have been decoded by our worker thread
         if (cacheMiss) {
@@ -372,15 +398,28 @@ public class TileBitmapDrawable extends Drawable {
             if (mListener != null) {
                 mListener.onStartInitialization();
             }
-            if (placeHolder != null) {
-                mImageView.setImageDrawable(placeHolder);
+            if (placeHolder != null) {//旋转加载图片
+                int rotation = 0;
+                if (imageView instanceof TouchImageView) {
+                    rotation = ((TouchImageView) imageView).getExifRotation();
+                }
+                if (rotation != 0) {
+                    Matrix matrix = new Matrix();
+                    matrix.setRotate(-rotation);//向相反方向旋转
+                    BitmapDrawable bitmapDrawable = (BitmapDrawable) placeHolder;
+                    Bitmap bitmap = Bitmap.createBitmap(bitmapDrawable.getBitmap(), 0, 0, bitmapDrawable.getIntrinsicWidth(), bitmapDrawable.getIntrinsicHeight(), matrix, false);
+                    if (bitmap != bitmapDrawable.getBitmap()) {
+                        bitmapDrawable.getBitmap().recycle();
+                    }
+                    mImageView.setImageBitmap(bitmap);
+//                mImageView.setImageDrawable(placeHolder);
+                }
             }
         }
 
         @Override
         protected Object doInBackground(Object... params) {
             BitmapRegionDecoder decoder = null;
-
             try {
                 if (params[0] instanceof String) {
                     decoder = BitmapRegionDecoder.newInstance((String) params[0], false);

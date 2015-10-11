@@ -5,15 +5,21 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.drawable.Drawable;
+import android.media.ExifInterface;
 import android.os.Build;
 import android.support.v4.view.ViewCompat;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
+import android.view.ViewTreeObserver;
 import android.view.animation.Animation;
 import android.view.animation.LinearInterpolator;
 import android.view.animation.Transformation;
 import android.widget.ImageView;
+import com.nineoldandroids.view.ViewHelper;
+
+import java.io.IOException;
 
 public class TouchImageView extends ImageView {
 
@@ -40,6 +46,12 @@ public class TouchImageView extends ImageView {
 	private final FlingScroller mFlingScroller = new FlingScroller();
 	private boolean mIsAnimatingBack;
 
+	private int rotation=0;//IamgeView旋转角度，根据图片Exif获取
+
+	public int getExifRotation(){
+		return rotation;
+	}
+
 	public TouchImageView(Context context) {
 		this(context, null);
 	}
@@ -48,6 +60,7 @@ public class TouchImageView extends ImageView {
 		this(context, attrs, 0);
 	}
 
+	//<!-- 必须设置layout_centerInParent，根据exif旋转时才能时图片居中 -->
 	public TouchImageView(Context context, AttributeSet attrs, int defStyle) {
 		super(context, attrs, defStyle);
 
@@ -161,7 +174,7 @@ public class TouchImageView extends ImageView {
 				if(mLastFocusX != null && mLastFocusY != null) {
 					final float dx = computeScaleTranslation(getMeasuredWidth(), currentDrawableWidth, mTranslationX, focusX - mLastFocusX);
 					final float dy = computeScaleTranslation(getMeasuredHeight(), currentDrawableHeight, mTranslationY, focusY - mLastFocusY);
-					
+
 					if(dx != 0 || dy != 0) {
 						mMatrix.postTranslate(dx, dy);
 					}
@@ -172,7 +185,7 @@ public class TouchImageView extends ImageView {
 
 				mLastFocusX = focusX;
 				mLastFocusY = focusY;
-				
+
 				clearAnimation();
 				ViewCompat.postInvalidateOnAnimation(TouchImageView.this);
 
@@ -210,18 +223,52 @@ public class TouchImageView extends ImageView {
 		super.setScaleType(ScaleType.MATRIX);
 	}
 
+	public void setImagePath(String path){
+		rotation=getRotationByExif(path);
+		getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+			@Override
+			public void onGlobalLayout() {
+				if(isRotated||rotation==0)//第二次时取消监听
+				   getViewTreeObserver().removeGlobalOnLayoutListener(this);
+				//0度不用旋转
+				if(rotation==0) return;
+				//旋转相应角度
+				ViewHelper.setPivotX(TouchImageView.this, getWidth()/2);
+				ViewHelper.setPivotY(TouchImageView.this, getHeight()/2);
+				ViewHelper.setRotation(TouchImageView.this, rotation);
+				if(!isRotated) {
+					//重新布局，调换宽高
+					isRotated = true;
+					requestLayout();
+				}
+			}
+		});
+	}
+
+	private boolean isRotated=false;
+	private int widthMeasureSpec, heightMeasureSpec;
+
 	@Override
 	protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-		final int oldMeasuredWidth = getMeasuredWidth();
-		final int oldMeasuredHeight = getMeasuredHeight();
-
-		super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+		int oldMeasuredWidth = getMeasuredWidth();
+		int oldMeasuredHeight = getMeasuredHeight();
+		if(!isRotated){//初次加载，记录原始的宽高
+			this.widthMeasureSpec=widthMeasureSpec;
+			this.heightMeasureSpec=heightMeasureSpec;
+			super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+		}else if(rotation==90||rotation==270){//重新布局，调换宽高
+			oldMeasuredWidth = getMeasuredHeight();
+			oldMeasuredHeight = getMeasuredWidth();
+			super.onMeasure(this.heightMeasureSpec, this.widthMeasureSpec);
+		}else{
+			super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+		}
 
 		if(oldMeasuredWidth != getMeasuredWidth() || oldMeasuredHeight != getMeasuredHeight()) {
 			resetToInitialState();
 		}
 	}
-	
+
 	@Override
 	protected void onDraw(Canvas canvas) {
 		super.setImageMatrix(mMatrix);
@@ -233,7 +280,7 @@ public class TouchImageView extends ImageView {
 		if(matrix == null) {
 			matrix = new Matrix();
 		}
-		
+
 		if(!mMatrix.equals(matrix)) {
 			mMatrix.set(matrix);
 			invalidate();
@@ -310,7 +357,7 @@ public class TouchImageView extends ImageView {
 		final float freeSpaceHorizontal = (getMeasuredWidth() - (mDrawableIntrinsicWidth * minScale)) / 2F;
 		final float freeSpaceVertical = (getMeasuredHeight() - (mDrawableIntrinsicHeight * minScale)) / 2F;
 		mMatrix.postTranslate(freeSpaceHorizontal, freeSpaceVertical);
-		
+
 		invalidate();
 	}
 
@@ -352,7 +399,7 @@ public class TouchImageView extends ImageView {
 
 		return delta;
 	}
-	
+
 	private static float computeScaleTranslation(float viewSize, float drawableSize, float currentTranslation, float delta) {
 		final float minTranslation = viewSize > drawableSize ? 0 : viewSize - drawableSize;
 		final float maxTranslation = viewSize > drawableSize ? viewSize - drawableSize : 0;
@@ -469,5 +516,37 @@ public class TouchImageView extends ImageView {
 
 			ViewCompat.postInvalidateOnAnimation(TouchImageView.this);
 		}
+	}
+
+	private int getRotationByExif(String path) {
+		int rotation = 0;
+		ExifInterface exif = null;
+		try {
+			exif = new ExifInterface(path);
+		} catch (IOException e) {
+			e.printStackTrace();
+			return 0;
+		}
+		if (exif != null) {
+			// 读取图片中相机方向信息
+			int ori = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+					ExifInterface.ORIENTATION_UNDEFINED);
+			// 计算旋转角度
+			switch (ori) {
+				case ExifInterface.ORIENTATION_ROTATE_90:
+					rotation = 90;
+					break;
+				case ExifInterface.ORIENTATION_ROTATE_180:
+					rotation = 180;
+					break;
+				case ExifInterface.ORIENTATION_ROTATE_270:
+					rotation = 270;
+					break;
+				default:
+					rotation = 0;
+					break;
+			}
+		}
+		return rotation;
 	}
 }
